@@ -1127,7 +1127,7 @@ begin
 
 	//RSA_public_encrypt
 	len := RSA_public_encrypt(Length(str),
-	                          PAnsiChar(str),
+	                          PByte(@str[1]),
 				  FCryptedBuffer,
 				  rsa,
 				  RSA_PKCS1_PADDING);
