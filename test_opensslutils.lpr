@@ -5,6 +5,13 @@ program test_opensslutils;
 uses
   Classes, SysUtils, fpcunit, testregistry, consoletestrunner, opensslutils;
 
+const
+  TEST_PASSPHRASE = '1234';
+
+
+
+
+
 type
   TOpenSSLUtilsTests = class(TTestCase)
   private
@@ -75,20 +82,20 @@ end;
 procedure TOpenSSLUtilsTests.Test_03_MakeCertAndReq;
 begin
   AssertTrue('Génération du certificat racine auto-signé',
-    mkcert('ca.crt', 'Test CA', '', '', '01', true));
+    mkcert('ca.crt', 'Test CA', '', TEST_PASSPHRASE, '01', true));
   AssertTrue('Le fichier ca.crt doit exister', FileExists(FTestDir + 'ca.crt'));
   AssertTrue('Le fichier ca.key doit exister', FileExists(FTestDir + 'ca.key'));
 
   AssertTrue('Génération de la demande CSR',
-    mkreq('client.local', '', 'client.csr'));
+    mkreq('client.local', TEST_PASSPHRASE, 'client.csr'));
   AssertTrue('Le fichier client.csr doit exister', FileExists(FTestDir + 'client.csr'));
   AssertTrue('Le fichier client.key doit exister', FileExists(FTestDir + 'client.key'));
 end;
 
 procedure TOpenSSLUtilsTests.Test_04_SignReq;
 begin
-  AssertTrue('Création du CA', mkcert('ca.crt', 'Test CA', '', '', '01', true));
-  AssertTrue('Création du CSR', mkreq('client.local', '', 'client.csr'));
+  AssertTrue('Création du CA', mkcert('ca.crt', 'Test CA', '', TEST_PASSPHRASE, '01', true));
+  AssertTrue('Création du CSR', mkreq('client.local', TEST_PASSPHRASE, 'client.csr'));
 
   AssertTrue('Signature du CSR', signreq('client.csr', 'ca.crt'));
   AssertTrue('Le certificat signé client.crt doit exister', FileExists(FTestDir + 'client.crt'));
@@ -96,7 +103,7 @@ end;
 
 procedure TOpenSSLUtilsTests.Test_05_ConversionsX509;
 begin
-  AssertTrue('Création certificat initial', mkcert('cert.crt', 'Test Conv'));
+  AssertTrue('Création certificat initial', mkcert('cert.crt', 'Test Conv', '', TEST_PASSPHRASE));
 
   AssertTrue('Conversion PEM vers DER', X509PEM2DER('cert.crt'));
   AssertTrue('Le fichier cert.der doit exister', FileExists(FTestDir + 'cert.der'));
@@ -107,18 +114,16 @@ begin
 end;
 
 procedure TOpenSSLUtilsTests.Test_06_ConversionsPKCS12;
-const
-  Pwd = 'SecretPassword123';
 begin
-  AssertTrue('Création cert', mkcert('app.crt', 'Test PFX'));
+  AssertTrue('Création cert', mkcert('app.crt', 'Test PFX', '', TEST_PASSPHRASE));
 
-  AssertTrue('Export en PFX', PEM2PFX(Pwd, 'app.key', 'app.crt'));
+  AssertTrue('Export en PFX', PEM2PFX(TEST_PASSPHRASE, 'app.key', 'app.crt'));
   AssertTrue('Le fichier app.pfx doit exister', FileExists(FTestDir + 'app.pfx'));
 
   DeleteFile(FTestDir + 'app.crt');
   DeleteFile(FTestDir + 'app.key');
 
-  AssertTrue('Import depuis PFX', PFX2PEM('app.pfx', Pwd));
+  AssertTrue('Import depuis PFX', PFX2PEM('app.pfx', TEST_PASSPHRASE));
   AssertTrue('Le fichier app.crt doit être extrait', FileExists(FTestDir + 'app.crt'));
   AssertTrue('Le fichier app.key doit être extrait', FileExists(FTestDir + 'app.key'));
 end;
@@ -131,7 +136,7 @@ begin
   AssertTrue('Génération paire de clés RSA', generate_rsa_key_2);
 
   OriginalText := 'Message secret de test 12345';
-  EncryptedText := ''; // Initialisation explicite pour éviter le Warning FPC
+  EncryptedText := '';
   AssertTrue('Chiffrement RSA public', Encrypt_Pub(OriginalText, EncryptedText));
   AssertFalse('Le texte chiffré ne doit pas être vide', EncryptedText = '');
 
