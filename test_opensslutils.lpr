@@ -1,11 +1,9 @@
-unit test_opensslutils;
+program test_opensslutils;
 
 {$mode objfpc}{$H+}
 
-interface
-
 uses
-  Classes, SysUtils, fpcunit, testregistry, opensslutils;
+  Classes, SysUtils, fpcunit, testregistry, consoletestrunner, opensslutils;
 
 type
   TOpenSSLUtilsTests = class(TTestCase)
@@ -27,7 +25,7 @@ type
     procedure Test_09_Base64;
   end;
 
-implementation
+{ TOpenSSLUtilsTests }
 
 procedure TOpenSSLUtilsTests.CleanTestFiles;
 var
@@ -64,7 +62,6 @@ end;
 
 procedure TOpenSSLUtilsTests.Test_01_LoadAndFreeSSL;
 begin
-  // Vérifie que l'initialisation ne plante pas
   AssertTrue('L initialisation SSL doit s exécuter sans erreur', true);
 end;
 
@@ -90,7 +87,6 @@ end;
 
 procedure TOpenSSLUtilsTests.Test_04_SignReq;
 begin
-  // Dépend de la présence de ca.crt/ca.key et client.csr
   AssertTrue('Création du CA', mkcert('ca.crt', 'Test CA', '', '', '01', true));
   AssertTrue('Création du CSR', mkreq('client.local', '', 'client.csr'));
 
@@ -105,7 +101,6 @@ begin
   AssertTrue('Conversion PEM vers DER', X509PEM2DER('cert.crt'));
   AssertTrue('Le fichier cert.der doit exister', FileExists(FTestDir + 'cert.der'));
 
-  // Renomme le CRT original pour tester la recréation depuis DER
   DeleteFile(FTestDir + 'cert.crt');
   AssertTrue('Conversion DER vers PEM', X509DER2PEM('cert.der'));
   AssertTrue('Le fichier cert.crt doit être recréé', FileExists(FTestDir + 'cert.crt'));
@@ -136,6 +131,7 @@ begin
   AssertTrue('Génération paire de clés RSA', generate_rsa_key_2);
 
   OriginalText := 'Message secret de test 12345';
+  EncryptedText := ''; // Initialisation explicite pour éviter le Warning FPC
   AssertTrue('Chiffrement RSA public', Encrypt_Pub(OriginalText, EncryptedText));
   AssertFalse('Le texte chiffré ne doit pas être vide', EncryptedText = '');
 
@@ -144,7 +140,7 @@ end;
 
 procedure TOpenSSLUtilsTests.Test_08_CryptoAndHashes;
 var
-  Data: array[0..4] of byte = ($54, $65, $73, $74, $73); // "Tests"
+  Data: array[0..4] of byte = ($54, $65, $73, $74, $73);
 begin
   AssertTrue('Calcul de hash SHA256', hash('sha256', Data));
   AssertTrue('Chiffrement AES-256-CBC', crypt('aes-256-cbc', 'Hello OpenSSL', '00112233445566778899AABBCCDDEEFF00112233445566778899AABBCCDDEEFF', '000102030405060708090A0B0C0D0E0F', 1));
@@ -158,6 +154,15 @@ begin
   AssertTrue('Décodage Base64', Base64Decode('AQIDBA=='));
 end;
 
-initialization
+var
+  Application: TTestRunner;
+begin
   RegisterTest(TOpenSSLUtilsTests);
+  Application := TTestRunner.Create(nil);
+  try
+    Application.Initialize;
+    Application.Run;
+  finally
+    Application.Free;
+  end;
 end.
