@@ -36,6 +36,7 @@ var
   Exts: array[0..6] of string = ('.key', '.crt', '.csr', '.der', '.pfx', '.p7b', '.pem');
   i: Integer;
 begin
+  //exit;
   for i := Low(Exts) to High(Exts) do
   begin
     if FindFirst(FTestDir + '*' + Exts[i], faAnyFile, SR) = 0 then
