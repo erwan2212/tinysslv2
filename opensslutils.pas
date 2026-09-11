@@ -624,158 +624,124 @@ begin
 end;
 
 //the private key of the resulting cert is the request.key
-function signreq(filename:string;cert:string;read_password:string='';alt:string='';ca:boolean=false):boolean;
-const
-   LN_commonName=                   'commonName';
-   //NID_commonName=                  13;
-   X509V3_ADD_DEFAULT =0;
+function signreq(filename: string; cert: string; read_password: string = ''; alt: string = ''; ca: boolean = false): boolean;
 var
-ret:integer = 0;
-pkey:PEVP_PKEY=nil;
-pktmp:PEVP_PKEY=nil;
-rsa:pRSA=nil;
-cert_rsa:pRSA=nil;
-x509_ca:pX509=nil;
-x509_cert:pX509=nil;
-X509_REQ:pX509_REQ=nil;
-bp:pBIO;
-serial:integer = 1;
-days:long = 365 * 24 * 3600; // 1 year
-subject:pX509_NAME = nil;
-tmpname:pX509_NAME = nil;
-//test
-cert_entry:pX509_NAME_ENTRY=nil;
-entryData:pASN1_STRING;
-cn:ppansichar;
-//
-value:string;
-digest:array[0..63] of byte;
-size,i:cardinal;
-subjectKeyIdentifier:pASN1_OCTET_STRING;
-bin:pointer;
+  ret: integer;
+  pkey: PEVP_PKEY = nil;
+  pktmp: PEVP_PKEY = nil;
+  x509_ca: pX509 = nil;
+  x509_cert: pX509 = nil;
+  X509_REQ: pX509_REQ = nil;
+  bp: pBIO = nil;
+  serial: integer = 1;
+  days: long = 365 * 24 * 3600; // 1 year
+  value: string;
 label free_all;
 begin
   log('signreq');
-  log('filename:'+filename);
-  log('cert:'+cert);
-  result:=false;
-  // load ca
+  log('filename:' + filename);
+  log('cert:' + cert);
+  result := false;
+
+  // 1. Load CA Certificate
   bp := BIO_new_file(pchar(cert), 'r+');
+  if bp = nil then goto free_all;
   log('PEM_read_bio_X509');
-  x509_ca:=PEM_read_bio_X509(bp,nil,nil,nil);
+  x509_ca := PEM_read_bio_X509(bp, nil, nil, nil);
   BIO_free(bp);
-  if x509_ca=nil then goto free_all;
+  bp := nil;
+  if x509_ca = nil then goto free_all;
 
-  //loadCAPrivateKey
+  // 2. Load CA Private Key
   try
-  //rsa:=RSAOpenSSLPrivateKey(ChangeFileExt (cert,'.key'),read_password);
-  pkey:=LoadPrivateKey (ChangeFileExt (cert,'.key'),read_password);
-  if pkey=nil then exception.Create ('pkey is nul');
+    pkey := LoadPrivateKey(ChangeFileExt(cert, '.key'), read_password);
   except
-  on e:exception do begin log(e.message,1);exit;end;
-  end; //try
+    on e: Exception do
+    begin
+      log(e.message, 1);
+      pkey := nil;
+    end;
+  end;
+  // Test d'échec sorti du bloc try..except pour éviter le "Jump outside of an exception block"
+  if pkey = nil then goto free_all;
 
-  //generate key
-  {
-  log('EVP_PKEY_new');
-  pkey := EVP_PKEY_new();
-  log('EVP_PKEY_assign_RSA');
-  EVP_PKEY_assign(pkey,EVP_PKEY_RSA,PCharacter(rsa));
-  }
-
-  // load X509 Req
+  // 3. Load CSR (X509 REQ)
   bp := BIO_new_file(pchar(filename), 'r+');
+  if bp = nil then goto free_all;
   log('PEM_read_bio_X509_REQ');
   X509_REQ := PEM_read_bio_X509_REQ(bp, nil, nil, nil);
   BIO_free(bp);
-  if X509_REQ=nil then goto free_all;
-  //
+  bp := nil;
+  if X509_REQ = nil then goto free_all;
+
+  // 4. Create new X509 Cert
   x509_cert := X509_new();
-  // set version to X509 v3 certificate
+  if x509_cert = nil then goto free_all;
+
+  // Set Version (v3 = 2)
   log('X509_set_version');
-  X509_set_version(x509_cert,2);
-  // set serial
+  X509_set_version(x509_cert, 2);
+
+  // Set Serial
   log('X509_get_serialNumber');
   ASN1_INTEGER_set(X509_get_serialNumber(x509_cert), serial);
-  // set issuer name frome ca
+
+  // Set Issuer Name from CA
   log('X509_set_issuer_name');
-  X509_set_issuer_name(x509_cert, X509_get_subject_name(x509_ca ));
-  //test ok
-  {
-  cert_entry := X509_NAME_get_entry(X509_get_subject_name(x509_ca ),X509_NAME_get_index_by_NID(X509_get_subject_name(x509_ca ), NID_commonName, 0));
-  entryData := X509_NAME_ENTRY_get_data( cert_entry );
-  ASN1_STRING_to_UTF8(CN, entryData);
-  writeln(strpas(cn^));
-  }
-  // set time
+  X509_set_issuer_name(x509_cert, X509_get_subject_name(x509_ca));
+
+  // Set Validity Dates
   X509_gmtime_adj(X509_get_notBefore(x509_cert), 0);
   X509_gmtime_adj(X509_get_notAfter(x509_cert), days);
-  //log('X509_NAME_add_entry_by_txt');
-  //X509_NAME_add_entry_by_txt(subject, 'CN', MBSTRING_ASC,pchar('localhost'), -1, -1, 0);
-  log('X509_set_subject_name'); //from req -> CN
+
+  // Set Subject Name from REQ
+  log('X509_set_subject_name');
   X509_set_subject_name(x509_cert, X509_REQ_get_subject_name(X509_REQ));
-  //X509_NAME_add_entry_by_NID(X509_get_subject_name(X509_cert), NID_pkcs9_emailAddress, MBSTRING_ASC, pchar('me@domain.com'), -1, -1, 0);
-  // set pubkey from req
+
+  // Set Public Key from REQ
   pktmp := X509_REQ_get_pubkey(X509_REQ);
+  if pktmp = nil then goto free_all;
   log('X509_set_pubkey');
   ret := X509_set_pubkey(x509_cert, pktmp);
   EVP_PKEY_free(pktmp);
-  //
+  if ret <> 1 then goto free_all;
 
-  if ca=true then add_ext(x509_cert, NID_basic_constraints, 'critical,CA:true');
-  if alt<>'' then add_ext(x509_cert, NID_subject_alt_name,pchar(alt)); //'DNS:localhost'
+  // Extensions
+  if ca then add_ext(x509_cert, NID_basic_constraints, 'critical,CA:true');
+  if alt <> '' then add_ext(x509_cert, NID_subject_alt_name, pchar(alt));
 
-  //rfc 5280 - key_usage
-  value:=ini_readstring('req_ext','key_usage');
-  if value<>'' then add_ext(x509_cert, NID_key_usage, pchar(value)); //'critical,digitalSignature, nonRepudiation, keyEncipherment, dataEncipherment'
-  value:=ini_readstring('req_ext','subject_key_identifier');
-  //if value<>'' then add_ext(x509_cert, NID_subject_key_identifier, pchar(value)); //'hash'
-  if value='hash' then hash_pubkey (x509_cert);
-  //not ready, see https://github.com/warmlab/study/blob/master/openssl/x509.c
-  //value:=ini_readstring('req_ext','authority_key_identifier');
-  //if value<>'' then add_ext(x509_cert, NID_authority_key_identifier, pchar(value)); //'keyid:always,issuer:always'
-  value:=ini_readstring('req_ext','ext_key_usage');
-  if value<>'' then add_ext(x509_cert, NID_ext_key_usage, pchar(value)); //'critical, clientAuth, serverAuth'
+  value := ini_readstring('req_ext', 'key_usage');
+  if value <> '' then add_ext(x509_cert, NID_key_usage, pchar(value));
 
-  //do_X509_sign;
-  log('do_X509_sign');
-  do_X509_sign(x509_cert, pkey, EVP_sha256 ());
-  //or simpler?
-  //X509_sign(x509_cert, pkey,EVP_sha256());
-  //
+  value := ini_readstring('req_ext', 'subject_key_identifier');
+  if value = 'hash' then hash_pubkey(x509_cert);
 
-  {
-  cert_rsa := EVP_PKEY_get1_RSA(pkey);
-  bp := BIO_new_file(pchar('signed.key'), 'w+');
-  log('PEM_write_bio_RSAPrivateKey');
-  PEM_write_bio_RSAPrivateKey(bp, cert_rsa,nil {EVP_des_ede3_cbc}, nil, 0, nil, nil);
-  BIO_free(bp);
-  RSA_free(cert_rsa);
-  }
-  {
-  bp := BIO_new_file(pchar('signed.key'), 'w+');
-  log('PEM_write_bio_PrivateKey');
-  PEM_write_bio_PrivateKey(bp,pkey,EVP_des_ede3_cbc(),nil,0,nil,nil);
-  BIO_free(bp);
-  }
+  value := ini_readstring('req_ext', 'ext_key_usage');
+  if value <> '' then add_ext(x509_cert, NID_ext_key_usage, pchar(value));
 
-  //save cert
-  bp := BIO_new_file(pchar(ChangeFileExt (filename,'.crt') ), 'w+');
-  log('PEM_write_bio_X509');
-  PEM_write_bio_X509(bp,x509_cert);
-  BIO_free(bp);
-  //
-  free_all:
+  // 5. SIGN THE CERTIFICATE (Signature SHA-256 valide)
+  log('X509_sign');
+  if X509_sign(x509_cert, pkey, EVP_sha256()) = 0 then
+  begin
+    log('Signature X509_sign failed', 1);
+    goto free_all;
+  end;
 
-  	X509_free(x509_cert);
-  	//BIO_free_all(out);
+  // 6. Save Certificate
+  bp := BIO_new_file(pchar(ChangeFileExt(filename, '.crt')), 'w+');
+  if bp <> nil then
+  begin
+    log('PEM_write_bio_X509');
+    ret := PEM_write_bio_X509(bp, x509_cert);
+    BIO_free(bp);
+    if ret = 1 then result := true;
+  end;
 
-  	X509_REQ_free(X509_REQ);
-  	X509_free(x509_ca);
-  	EVP_PKEY_free(pkey);
-
-  	result:= ret = 1;
-
+free_all:
+  if x509_cert <> nil then X509_free(x509_cert);
+  if X509_REQ <> nil then X509_REQ_free(X509_REQ);
+  if x509_ca <> nil then X509_free(x509_ca);
+  if pkey <> nil then EVP_PKEY_free(pkey);
 end;
 
 
