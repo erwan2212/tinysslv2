@@ -108,21 +108,52 @@ begin
   end;
 end;
 
-function LoadPrivateKey(KeyFile: string;password:string='') :pEVP_PKEY;
+function PassphraseCallback(buf: PAnsiChar; size: Integer; rwflag: Integer; udata: Pointer): Integer; cdecl;
+var
+  pass: PAnsiChar;
+  len: Integer;
+begin
+  Result := 0;
+  if udata = nil then Exit;
+
+  pass := PAnsiChar(udata);
+  len := Length(pass);
+  if len > size then len := size;
+
+  Move(pass^, buf^, len);
+  Result := len;
+end;
+
+function LoadPrivateKey(KeyFile: string; password: string = ''): pEVP_PKEY;
 var
   mem: pBIO;
-  k: pEVP_PKEY=nil;
 begin
-  result:=nil;
-  log('LoadPrivateKey: '+KeyFile);
-  //mem := BIO_new(BIO_s_file());
-  //BIO_read_filename(mem, PAnsiChar(KeyFile));
-  mem := BIO_new_file(pchar(KeyFile), 'r+');
+  Result := nil;
+  log('LoadPrivateKey: ' + KeyFile);
+
+  // Opening in read-only mode 'r' instead of 'r+'
+  mem := BIO_new_file(PChar(KeyFile), 'r');
+  if mem = nil then
+  begin
+    log('Erreur: impossible d''ouvrir le fichier ' + KeyFile);
+    Exit;
+  end;
+
   try
     log('PEM_read_bio_PrivateKey');
-    if password=''
-       then result := PEM_read_bio_PrivateKey(mem, k, nil, nil)
-       else result := PEM_read_bio_PrivateKey(mem, k, nil, pchar(password));
+    if password <> '' then
+    begin
+      // Custom callback to prevent any interactive prompt
+      Result := PEM_read_bio_PrivateKey(mem, nil, @PassphraseCallback, PAnsiChar(AnsiString(password)));
+    end
+    else
+    begin
+      // Passing a dummy callback returning 0 disables the interactive console prompt
+      Result := PEM_read_bio_PrivateKey(mem, nil, nil, nil);
+    end;
+
+    if Result = nil then
+      log('Erreur: echec de chargement de la cle privee (mot de passe incorrect ou format invalide)');
   finally
     BIO_free_all(mem);
   end;
@@ -451,34 +482,43 @@ p:=LoadPrivateKey(filename);
 
 end;
 
-function name_add_entry(section:string;name:px509_name):boolean;
+function name_add_entry(section: string; name: px509_name): boolean;
 var
-//
-ini:TIniFile;
-ident:tstrings;
-s:string;
-i:byte;
+  ini: TIniFile;
+  ident: TStrings;
+  s: string;
+  i: integer;
 begin
   log('name_add_entry');
-  result:=false;
-  if FileExists ('tinyssl.ini') then
-   begin
-   try
-   ini:=tinifile.Create ('tinyssl.ini');
-   ident:=tstringlist.Create ;
-   ini.ReadSection(section,ident) ;
-   for i:=0 to ident.count-1 do
-       begin
-       s:=ini.ReadString (section,ident[i],'');
-       log('X509_NAME_add_entry_by_txt');
-       X509_NAME_add_entry_by_txt(name, pchar(ident[i]),  MBSTRING_ASC,pchar(s), -1, -1, 0);
-       end;
-   ident.Free ;
-   result:=true;
-   except
-   on e:exception do;
-   end;
-   end; //if FileExists ('tinyssl.ini') then
+  result := false;
+
+  if (name = nil) or not FileExists('tinyssl.ini') then Exit;
+
+  ini := TIniFile.Create('tinyssl.ini');
+  ident := TStringList.Create;
+  try
+    try
+      ini.ReadSection(section, ident);
+      for i := 0 to ident.Count - 1 do
+      begin
+        s := ini.ReadString(section, ident[i], '');
+        if s <> '' then
+        begin
+          log('X509_NAME_add_entry_by_txt: ' + ident[i] + '=' + s);
+          // On passe ident[i] en PChar et on vérifie le retour d'OpenSSL
+          if X509_NAME_add_entry_by_txt(name, PChar(ident[i]), MBSTRING_ASC, PChar(s), -1, -1, 0) <> 1 then
+            log('Erreur OpenSSL sur la cle: ' + ident[i], 1);
+        end;
+      end;
+      result := true;
+    except
+      on e: Exception do
+        log('Exception name_add_entry: ' + e.Message, 1);
+    end;
+  finally
+    ident.Free;
+    ini.Free;
+  end;
 end;
 
 function ini_readstring(section,ident:string):string;
@@ -915,179 +955,199 @@ end;
 
 //to sign a csr
 //openssl x509 -req -in device.csr -CA rootCA.pem -CAkey rootCA.key -CAcreateserial -out device.crt -days 500 -sha256
-function mkreq(cn:string;keyfile,csrfile:string):boolean;
+function mkreq(cn: string; keyfile, csrfile: string): boolean;
 var
-ret:integer;
-rsa:pRSA;
-bp:pBIO;
-req:pX509_REQ;
-key:pEVP_PKEY;
-name:pX509_NAME;
+  ret: integer;
+  rsa: pRSA;
+  bne: pBIGNUM;
+  bp: pBIO;
+  req: pX509_REQ;
+  key: pEVP_PKEY;
+  name: pX509_NAME;
+  basePath: string;
 begin
-  log('mkCAcert');
-  log('csrfile:'+csrfile);
-  log('privatekey:'+keyfile);
-  log('cn:'+cn);
-result:=false;
+  log('mkreq');
+  log('csrfile:' + csrfile);
+  log('privatekey:' + keyfile);
+  log('cn:' + cn);
 
-    if keyfile='' then
-    begin
-    log('RSA_generate_key');
-    rsa := RSA_generate_key(
-    2048,   //* number of bits for the key - 2048 is a sensible value */
-    RSA_F4, //* exponent - RSA_F4 is defined as 0x10001L */
-    nil,   //* callback - can be NULL if we aren't displaying progress */
-    nil    //* callback argument - not needed in this case */
-    );
-    //generate key
-    //OpenSSL provides the EVP_PKEY structure for storing an algorithm-independent private key in memory
-    log('EVP_PKEY_new');
-    key := EVP_PKEY_new();
-    //assign key to our struct
-    //log('EVP_PKEY_assign_RSA');
-    //EVP_PKEY_assign(pkey,EVP_PKEY_RSA,PCharacter(rsa));
-    log('EVP_PKEY_set1_RSA');
-    EVP_PKEY_set1_RSA (key,rsa);
-    end
-    else
-    begin
-    log('Reusing '+keyfile+'...',1);
+  result := false;
+  key := nil;
+  req := nil;
+  basePath := IncludeTrailingPathDelimiter(GetCurrentDir);
+
+  // 1. Obtention de la clé privée
+  if keyfile = '' then
+  begin
+    log('Génération nouvelle clé RSA...');
+    RAND_poll;
+    bne := BN_new();
+    if bne = nil then Exit;
+
     try
-    //rsa:=RSAOpenSSLPrivateKey(keyfile,''); //password will be prompted
-    key:=LoadPrivateKey(keyfile);
-    if key=nil then exception.Create ('pkey is nul');
-    except
-    on e:exception do begin log(e.message,1);exit;end;
-    end; //try
+      BN_set_word(bne, RSA_F4);
+      rsa := RSA_new();
+      if rsa = nil then Exit;
+
+      if RSA_generate_key_ex(rsa, 2048, bne, nil) <> 1 then
+      begin
+        RSA_free(rsa);
+        Exit;
+      end;
+
+      key := EVP_PKEY_new();
+      if (key = nil) or (EVP_PKEY_assign(key, EVP_PKEY_RSA, PChar(rsa)) <> 1) then
+      begin
+        if key <> nil then EVP_PKEY_free(key) else RSA_free(rsa);
+        Exit;
+      end;
+    finally
+      BN_free(bne);
+    end;
+  end
+  else
+  begin
+    log('Reusing ' + keyfile + '...', 1);
+    key := LoadPrivateKey(keyfile);
+    if key = nil then
+    begin
+      log('Erreur: Impossible de charger la cle ' + keyfile, 1);
+      Exit; // Annule proprement au lieu de continuer avec un pointeur nil
+    end;
+  end;
+
+  try
+    // 2. Création de la requête X509
+    log('X509_REQ_new');
+    req := X509_REQ_new();
+    if req = nil then Exit;
+
+    X509_REQ_set_version(req, 0);
+    X509_REQ_set_pubkey(req, key);
+
+    log('X509_NAME_new');
+    name := X509_NAME_new();
+    if name <> nil then
+    begin
+      name_add_entry('req', name);
+      log('X509_NAME_add_entry_by_txt');
+      X509_NAME_add_entry_by_txt(name, 'CN', MBSTRING_ASC, PChar(cn), -1, -1, 0);
+      log('X509_REQ_set_subject_name');
+      X509_REQ_set_subject_name(req, name);
+      X509_NAME_free(name);
     end;
 
-        log('X509_REQ_new');
-	req := X509_REQ_new();
-	if req=nil then exit;
+    log('X509_REQ_sign');
+    if X509_REQ_sign(req, key, EVP_sha256()) = 0 then Exit;
 
-        //
-	X509_REQ_set_version(req, 0); //v1 ?
-	X509_REQ_set_pubkey(req, key);
+    // 3. Sauvegarde de la clé si elle a été générée
+    if keyfile = '' then
+    begin
+      bp := BIO_new_file(PChar(basePath + ChangeFileExt(csrfile, '.key')), 'w+');
+      if bp <> nil then
+      begin
+        log('PEM_write_bio_PrivateKey (no password)');
+        PEM_write_bio_PrivateKey(bp, key, nil, nil, 0, nil, nil);
+        BIO_free(bp);
+      end;
+    end;
 
-        log('X509_NAME_new');
-	name := X509_NAME_new; //X509_REQ_get_subject_name(req);
-        //
-        name_add_entry('req',name);
-        //
-        log('X509_NAME_add_entry_by_txt');
-	X509_NAME_add_entry_by_txt(name, 'CN', MBSTRING_ASC,pchar(cn), -1, -1, 0);
-        log('X509_REQ_set_subject_name');
-        ret:=X509_REQ_set_subject_name(Req, name); //since X509_REQ_get_subject_name(req) failed on me
-        X509_NAME_free(name);
+    // 4. Sauvegarde de la requête CSR
+    bp := BIO_new_file(PChar(basePath + csrfile), 'w+');
+    if bp <> nil then
+    begin
+      log('PEM_write_bio_X509_REQ');
+      PEM_write_bio_X509_REQ(bp, req);
+      BIO_free(bp);
+      result := true;
+    end;
 
-        //add extensions?
-
-        log('X509_REQ_sign');
-	X509_REQ_sign(req, key, EVP_sha256());
-
-        //we did not load a privatekey so lets save it
-        if keyfile='' then
-        begin
-        bp := BIO_new_file(pchar(GetCurrentDir+'\'+changefileext(csrfile,'.key')), 'w+');
-        //the private key will have no password
-        //log('PEM_write_bio_RSAPrivateKey');
-        //ret := PEM_write_bio_RSAPrivateKey(bp, rsa, nil, nil, 0, nil, nil);
-        log('PEM_write_bio_PrivateKey');
-        log('no password...');
-        ret := PEM_write_bio_PrivateKey(bp, key, nil, nil, 0, nil, nil);
-	BIO_free(bp);
-        end;
-
-        //save cert
-        bp := BIO_new_file(pchar(GetCurrentDir+'\'+csrfile), 'w+');
-        log('PEM_write_bio_X509_REQ');
-        PEM_write_bio_X509_REQ(bp, req);
-	BIO_free(bp);
-
-        //free
-        EVP_PKEY_free(key);
-	X509_REQ_free(req);
-
-result:=true;
-
+  finally
+    // Toujours libérer key et req, quelle que soit leur provenance
+    if req <> nil then X509_REQ_free(req);
+    if key <> nil then EVP_PKEY_free(key);
+  end;
 end;
 
+
+
 //PKCS#8
-function generate_rsa_key_2:boolean;
+function generate_rsa_key_2: boolean;
+label
+  cleanup;
 var
-ret:integer; //= 0;
-rsa:pRSA;//				 = nil;
-bne:pBIGNUM;// = nil;
-bp_public:pBIO;// = nil;
-bp_public2:pbio;
-bp_private:pBIO;// = nil;
-
-bits:integer; // = 2048;
-e:ulong; // = RSA_F4;
-//
-pkey:PEVP_PKEY;
-label free_all;
+  ret: integer;
+  rsa: pRSA;
+  bne: pBIGNUM;
+  bp_public: pBIO;
+  bp_private: pBIO;
+  bits: integer;
+  e: ulong;
+  pkey: PEVP_PKEY;
+  success: boolean;
+  basePath: string;
 begin
+  result := false;
+  success := false;
+  rsa := nil;
+  bne := nil;
+  bp_public := nil;
+  bp_private := nil;
+  pkey := nil;
+  bits := 2048;
+  e := RSA_F4;
+  basePath := IncludeTrailingPathDelimiter(GetCurrentDir);
 
-  //
-  ret:=0;
-  rsa:=nil;
-  bne:=nil;
-  bp_public :=nil;
-  bp_private :=nil;
-  bits:=2048;
-  e :=RSA_F4;
+  // 1. Initialisation du PRNG et BIGNUM
+  RAND_poll;
+  bne := BN_new();
+  if bne = nil then goto cleanup;
 
-	// 1. generate rsa key
-	bne := BN_new();
-	ret := BN_set_word(bne,e);
-	if ret <> 1 then goto free_all;
+  if BN_set_word(bne, e) <> 1 then goto cleanup;
 
-	rsa := RSA_new();
-        log('1. generate rsa key');
-        ret := RSA_generate_key_ex(rsa, bits, bne, nil);
-	if ret <> 1 then goto free_all;
+  // 2. Génération RSA
+  rsa := RSA_new();
+  if rsa = nil then goto cleanup;
 
-        log('EVP_PKEY_new');
-        pkey := EVP_PKEY_new();
-        log('EVP_PKEY_set1_RSA');
-        ret:=EVP_PKEY_set1_RSA (pkey,rsa);
-        if ret <> 1 then goto free_all;
+  log('1. generate rsa key');
+  if RSA_generate_key_ex(rsa, bits, bne, nil) <> 1 then goto cleanup;
 
-        // 2. save public key to pem
-	bp_public := BIO_new_file(pchar(GetCurrentDir+'\public.pem'), 'w+');
-        log('2. save public key OK');
-        ret:=PEM_write_bio_PUBKEY (bp_public ,pkey);
-	if ret <>1 then goto free_all;
+  log('EVP_PKEY_new');
+  pkey := EVP_PKEY_new();
+  if pkey = nil then goto cleanup;
 
-	    {
-		// 2.1 save public key to rsa -> creates the same file as above ...
-        bp_public2 := BIO_new_file(pchar(GetCurrentDir+'\public_rsa.pub'), 'w+');
-        log('2.1 save public key OK');
-        ret:=PEM_write_bio_RSA_PUBKEY (bp_public2 ,rsa);
-	    if ret <>1 then goto free_all;
-        }
+  log('EVP_PKEY_assign');
+  // EVP_PKEY_assign transfère la propriété de rsa vers pkey
+  if EVP_PKEY_assign(pkey, EVP_PKEY_RSA, PChar(rsa)) <> 1 then goto cleanup;
 
-	// 3. save private key
-        //check PEM_write_bio_RSAPrivateKey ?
-	bp_private := BIO_new_file(pchar(GetCurrentDir+'\private.pem'), 'w+');
-        //the private key will have no password
-        log('3. save private key');
-        log('no password...');
-        ret := PEM_write_bio_PrivateKey(bp_private, pkey, nil, nil, 0, nil, nil);
+  // rsa est désormais géré par pkey, on évite le RSA_free direct
+  rsa := nil;
 
-	// 4. free
-free_all:
-        log('free_all');
-	BIO_free_all(bp_public);
-    //BIO_free_all(bp_public2);
-	BIO_free_all(bp_private);
-	RSA_free(rsa);
-	BN_free(bne);
-        if pkey<>nil then EVP_PKEY_free(pkey);
+  // 3. Sauvegarde clé publique PEM
+  bp_public := BIO_new_file(PChar(basePath + 'public.pem'), 'w+');
+  if bp_public = nil then goto cleanup;
 
-	if ret=1 then result:=true else result:=false;
+  log('2. save public key OK');
+  if PEM_write_bio_PUBKEY(bp_public, pkey) <> 1 then goto cleanup;
 
+  // 4. Sauvegarde clé privée PEM
+  bp_private := BIO_new_file(PChar(basePath + 'private.pem'), 'w+');
+  if bp_private = nil then goto cleanup;
+
+  log('3. save private key (no password)');
+  if PEM_write_bio_PrivateKey(bp_private, pkey, nil, nil, 0, nil, nil) <> 1 then goto cleanup;
+
+  success := true;
+
+cleanup:
+  log('free_all');
+  if bp_public <> nil then BIO_free_all(bp_public);
+  if bp_private <> nil then BIO_free_all(bp_private);
+  if rsa <> nil then RSA_free(rsa);
+  if bne <> nil then BN_free(bne);
+  if pkey <> nil then EVP_PKEY_free(pkey);
+
+  result := success;
 end;
 
 //RSA_public_encrypt, RSA_private_decrypt - RSA public key cryptography

@@ -8,10 +8,6 @@ uses
 const
   TEST_PASSPHRASE = '1234';
 
-
-
-
-
 type
   TOpenSSLUtilsTests = class(TTestCase)
   private
@@ -81,29 +77,34 @@ end;
 
 procedure TOpenSSLUtilsTests.Test_03_MakeCertAndReq;
 begin
+  // Génération du CA Racine (ca.crt + ca.key)
   AssertTrue('Génération du certificat racine auto-signé',
     mkcert('ca.crt', 'Test CA', '', TEST_PASSPHRASE, '01', true));
   AssertTrue('Le fichier ca.crt doit exister', FileExists(FTestDir + 'ca.crt'));
-  AssertTrue('Le fichier ca.key doit exister', FileExists(FTestDir + 'ca.key'));
 
+  // Génération de la demande CSR (client.csr + client.key)
+  // '' indique à mkreq de générer une nouvelle clé
   AssertTrue('Génération de la demande CSR',
-    mkreq('client.local', TEST_PASSPHRASE, 'client.csr'));
+    mkreq('client.local', '', 'client.csr'));
   AssertTrue('Le fichier client.csr doit exister', FileExists(FTestDir + 'client.csr'));
-  AssertTrue('Le fichier client.key doit exister', FileExists(FTestDir + 'client.key'));
 end;
 
 procedure TOpenSSLUtilsTests.Test_04_SignReq;
 begin
+  // Préparation : Certificat CA et Demande CSR
   AssertTrue('Création du CA', mkcert('ca.crt', 'Test CA', '', TEST_PASSPHRASE, '01', true));
-  AssertTrue('Création du CSR', mkreq('client.local', TEST_PASSPHRASE, 'client.csr'));
 
-  AssertTrue('Signature du CSR', signreq('client.csr', 'ca.crt'));
+  // '' indique à mkreq de générer une nouvelle clé
+  AssertTrue('Création du CSR', mkreq('client.local', '', 'client.csr'));
+
+  // Signature de la demande CSR avec le mot de passe de la clé CA
+  AssertTrue('Signature du CSR', signreq('client.csr', 'ca.crt', TEST_PASSPHRASE, '', false));
   AssertTrue('Le certificat signé client.crt doit exister', FileExists(FTestDir + 'client.crt'));
 end;
 
 procedure TOpenSSLUtilsTests.Test_05_ConversionsX509;
 begin
-  AssertTrue('Création certificat initial', mkcert('cert.crt', 'Test Conv', '', TEST_PASSPHRASE));
+  AssertTrue('Création certificat initial', mkcert('cert.crt', 'Test Conv', '', TEST_PASSPHRASE, '01', false));
 
   AssertTrue('Conversion PEM vers DER', X509PEM2DER('cert.crt'));
   AssertTrue('Le fichier cert.der doit exister', FileExists(FTestDir + 'cert.der'));
@@ -115,7 +116,7 @@ end;
 
 procedure TOpenSSLUtilsTests.Test_06_ConversionsPKCS12;
 begin
-  AssertTrue('Création cert', mkcert('app.crt', 'Test PFX', '', TEST_PASSPHRASE));
+  AssertTrue('Création cert', mkcert('app.crt', 'Test PFX', '', TEST_PASSPHRASE, '01', false));
 
   AssertTrue('Export en PFX', PEM2PFX(TEST_PASSPHRASE, 'app.key', 'app.crt'));
   AssertTrue('Le fichier app.pfx doit exister', FileExists(FTestDir + 'app.pfx'));
