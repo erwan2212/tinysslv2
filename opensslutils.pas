@@ -765,159 +765,161 @@ These certificates are mainly used on the Windows platform.
 //openssl pkcs12 -in INFILE.p12 -out OUTFILE.crt -> encrypted private key
 //openssl pkcs12 -in INFILE.p12 -out OUTFILE.key -nodes -nocerts -> private key only
 //openssl pkcs12 -in INFILE.p12 -out OUTFILE.crt -nokeys -> cert only
-function mkcert(filename:string;cn:string;privatekey:string='';read_password:string='';serial:string='';ca:boolean=false):boolean;
+function mkcert(filename: string; cn: string; privatekey: string = ''; read_password: string = ''; serial: string = ''; ca: boolean = false): boolean;
 var
-    pkey:PEVP_PKEY=nil;
-    rsa:pRSA=nil;
-    x509:pX509=nil;
-    name:pX509_NAME=nil;
-    hfile:thandle=thandle(-1);
-    f:file;
-    bp:pBIO;
-    ret:integer;
-    days:long = 5 * 365 * 24 * 3600; // 5 years
-    //
-    bc:pBASIC_CONSTRAINTS;
-    iserial:integer=1;
-    asn1:pASN1_INTEGER =nil;
-    p:pBIGNUM=nil;
-    ctx:pBN_CTX=nil ;
-    //
-    value:string;
+  pkey: PEVP_PKEY = nil;
+  rsa: pRSA = nil;
+  x509: pX509 = nil;
+  name: pX509_NAME = nil;
+  bp: pBIO = nil;
+  ret: integer;
+  days_in_seconds: Int64;
+  iserial: integer = 1;
+  asn1: pASN1_INTEGER = nil;
+  p: pBIGNUM = nil;
+  ctx: pBN_CTX = nil;
+  e: pBIGNUM = nil;
+  value: string;
+  keyPath, certPath: string;
 begin
+  result := false;
   log('mkCAcert');
-  log('filename:'+filename);
-  log('cn:'+cn);
-  log('privatekey:'+privatekey);
-result:=false;
 
-  if privatekey='' then
-  begin
-  log('RSA_generate_key');
-  rsa := RSA_generate_key(
-    2048,   //* number of bits for the key - 2048 is a sensible value */
-    RSA_F4, //* exponent - RSA_F4 is defined as 0x10001L */
-    nil,   //* callback - can be NULL if we aren't displaying progress */
-    nil    //* callback argument - not needed in this case */
-    );
-  //generate key
-  //OpenSSL provides the EVP_PKEY structure for storing an algorithm-independent private key in memory
-  log('EVP_PKEY_new');
-  pkey := EVP_PKEY_new();
-  //assign key to our struct
-  //log('EVP_PKEY_assign_RSA');
-  //EVP_PKEY_assign(pkey,EVP_PKEY_RSA,PCharacter(rsa));
-  log('EVP_PKEY_set1_RSA');
-  EVP_PKEY_set1_RSA (pkey,rsa);
-  end
-  else
-  begin
-  log('Reusing '+privatekey+'...',1);
+  // Construction des chemins
+  certPath := filename;
+  if ExtractFilePath(certPath) = '' then
+    certPath := IncludeTrailingPathDelimiter(GetCurrentDir) + certPath;
+  keyPath := ChangeFileExt(certPath, '.key');
+
   try
-  //rsa:=RSAOpenSSLPrivateKey(privatekey,read_password); //password will be prompted
-  pkey:=LoadPrivateKey (privatekey,read_password);
-  if pkey=nil then exception.Create ('pkey is nul');
-  except
-  on e:exception do begin log(e.message,1);exit;end;
-  end; //try
+    // 1. Clé privée (Génération ou Chargement)
+    if privatekey = '' then
+    begin
+      log('RSA_generate_key_ex (OpenSSL 1.1.1)');
+      rsa := RSA_new();
+      if rsa = nil then Exit;
+
+      e := BN_new();
+      try
+        BN_set_word(e, RSA_F4); // 65537
+        if RSA_generate_key_ex(rsa, 2048, e, nil) <> 1 then
+          Exit;
+      finally
+        BN_free(e); // Libération du BIGNUM temporaire pour l'exposant
+      end;
+
+      pkey := EVP_PKEY_new();
+      if pkey = nil then Exit;
+
+      // Assignation : pkey prend la propriété de rsa
+      //if EVP_PKEY_assign_RSA(pkey, rsa) <> 1 then Exit;
+      EVP_PKEY_assign(pkey, EVP_PKEY_RSA, PAnsiChar(rsa));
+
+      rsa := nil; // rsa est maintenant géré par pkey, on ne le libérera pas manuellement
+    end
+    else
+    begin
+      log('Reusing ' + privatekey);
+      pkey := LoadPrivateKey(privatekey, read_password);
+      if pkey = nil then Exit;
+    end;
+
+    // 2. Création du certificat X509 v3
+    x509 := X509_new();
+    if x509 = nil then Exit;
+
+    X509_set_version(x509, 2); // 2 = v3
+
+    // 3. Numéro de série
+    if serial = '' then
+    begin
+      ASN1_INTEGER_set(X509_get_serialNumber(x509), iserial);
+    end
+    else
+    begin
+      ctx := BN_CTX_new();
+      p := BN_new();
+      try
+        BN_hex2bn(p, PAnsiChar(AnsiString(serial)));
+        asn1 := BN_to_ASN1_INTEGER(p, nil);
+        X509_set_serialNumber(x509, asn1);
+      finally
+        if asn1 <> nil then ASN1_INTEGER_free(asn1);
+        if p <> nil then BN_free(p);
+        if ctx <> nil then BN_CTX_free(ctx);
+      end;
+    end;
+
+    // 4. Durée de validité (5 ans)
+    days_in_seconds := Int64(5) * 365 * 24 * 3600;
+    X509_gmtime_adj(X509_get_notBefore(x509), 0);
+    X509_gmtime_adj(X509_get_notAfter(x509), days_in_seconds);
+
+    // 5. Clé publique
+    X509_set_pubkey(x509, pkey);
+
+    // 6. Subject & Issuer
+    name := X509_NAME_new();
+    if name = nil then Exit;
+    try
+      name_add_entry('cert', name);
+      X509_NAME_add_entry_by_txt(name, 'CN', MBSTRING_ASC, PAnsiChar(AnsiString(cn)), -1, -1, 0);
+      X509_set_subject_name(x509, name);
+      X509_set_issuer_name(x509, name);
+    finally
+      X509_NAME_free(name); // Nettoyage impératif (OpenSSL fait une copie interne)
+    end;
+
+    // 7. Extensions
+    if ca then
+      add_ext(x509, NID_basic_constraints, 'critical,CA:TRUE');
+
+    value := ini_readstring('cert_ext', 'key_usage');
+    if value = '' then value := 'digitalSignature';
+    add_ext(x509, NID_key_usage, PAnsiChar(AnsiString(value)));
+
+    value := ini_readstring('cert_ext', 'subject_key_identifier');
+    if value = 'hash' then hash_pubkey(x509);
+
+    value := ini_readstring('cert_ext', 'ext_key_usage');
+    if value <> '' then add_ext(x509, NID_ext_key_usage, PAnsiChar(AnsiString(value)));
+
+    // 8. Signature du certificat avec SHA-256
+    if X509_sign(x509, pkey, EVP_sha256()) = 0 then Exit;
+
+    // 9. Écriture de la clé privée sur disque (uniquement si générée)
+    if privatekey = '' then
+    begin
+      bp := BIO_new_file(PAnsiChar(AnsiString(keyPath)), 'w+');
+      if bp = nil then Exit;
+      try
+        // Note : si vous souhaitez supprimer le prompt interactif console,
+        // passez le mot de passe dans kstr/klen ou mettez le 3e paramètre à nil pour enregistrer en clair.
+        ret := PEM_write_bio_PrivateKey(bp, pkey, EVP_des_ede3_cbc(), nil, 0, nil, nil);
+      finally
+        BIO_free(bp);
+      end;
+      if ret <= 0 then Exit;
+    end;
+
+    // 10. Écriture du Certificat sur disque
+    bp := BIO_new_file(PAnsiChar(AnsiString(certPath)), 'w+');
+    if bp = nil then Exit;
+    try
+      ret := PEM_write_bio_X509(bp, x509);
+    finally
+      BIO_free(bp);
+    end;
+    if ret <= 0 then Exit;
+
+    result := true;
+
+  finally
+    // Nettoyage sécurisé
+    if rsa <> nil then RSA_free(rsa); // Utilisé seulement si EVP_PKEY_assign_RSA a échoué
+    if x509 <> nil then X509_free(x509);
+    if pkey <> nil then EVP_PKEY_free(pkey);
   end;
-
-
-
-//OpenSSL uses the X509 structure to represent an x509 certificate in memory
-log('X509_new');
-x509 := X509_new();
-// set version to X509 v3 certificate
-log('X509_set_version');
-X509_set_version(x509,2);
-//Now we need to set a few properties of the certificate
-if serial='' then  ASN1_INTEGER_set (X509_get_serialNumber(x509), iserial);
-if serial<>'' then
-begin
-ctx := BN_CTX_new();
-p := BN_new();
-BN_hex2bn(p, @serial[1]);
-//openssl x509 -noout -serial -in ca.crt
-//Writeln('BN_bn2hex: ', strpas(BN_bn2hex(p )));
-asn1:=BN_to_ASN1_INTEGER (p,nil);
-X509_set_serialNumber(x509,asn1);
-end;
-//
-X509_gmtime_adj(X509_get_notBefore(x509), 0);
-X509_gmtime_adj(X509_get_notAfter(x509), days);
-//Now we need to set the public key for our certificate using the key we generated earlier
-log('X509_set_pubkey');
-X509_set_pubkey(x509, pkey);
-//Since this is a self-signed certificate, we set the name of the issuer to the name of the subject
-log('X509_NAME_new');
-name := X509_NAME_new ; //X509_get_subject_name(x509);
-//
-name_add_entry('cert',name);
-//
-log('X509_NAME_add_entry_by_txt');
-X509_NAME_add_entry_by_txt(name, 'CN', MBSTRING_ASC,pchar(cn), -1, -1, 0);
-//
-log('X509_set_subject_name');
-ret:=X509_set_subject_name(x509, name);
-//Now we can actually set the issuer name:
-log('X509_set_issuer_name');
-X509_set_issuer_name(x509, name);
-
-{
-bc:=BASIC_CONSTRAINTS_new;
-bc^.ca :=1;
-X509_add1_ext_i2d(x509, NID_basic_constraints,bc,1,0 ); //'critical,CA:TRUE'
-}
-
-//https://www.openssl.org/docs/man1.1.1/man3/X509V3_EXT_d2i.html
-if ca=true then add_ext(x509, NID_basic_constraints, 'critical,CA:TRUE');
-value:=ini_readstring('cert_ext','key_usage');
-if value='' then value:='digitalSignature';
-if value<>'' then add_ext(x509, NID_key_usage, pchar(value)); //'critical,keyCertSign,cRLSign'
-value:=ini_readstring('cert_ext','subject_key_identifier');
-//if value<>'' then add_ext(x509, NID_subject_key_identifier, pchar(value)); //'hash'
-if value='hash' then hash_pubkey (x509);
-//value:=ini_readstring('cert_ext','authority_key_identifier');
-//if value<>'' then add_ext(x509, NID_authority_key_identifier, pchar(value)); //'keyid:always,issuer:always'
-value:=ini_readstring('cert_ext','ext_key_usage');
-if value<>'' then add_ext(x509, NID_ext_key_usage, pchar(value)); //'critical, clientAuth, serverAuth'
-
-//And finally we are ready to perform the signing process. We call X509_sign with the key we generated earlier. The code for this is painfully simple:
-log('X509_sign');
-X509_sign(x509, pkey, EVP_sha256());
-
-//write out to disk
-//if we loaded an existing private key, we could skip the below
-if privatekey='' then
-begin
-  bp := BIO_new_file(pchar(GetCurrentDir+'\'+ChangeFileExt (filename,'.key')), 'w+');
-  //PEM_write_bio_PrivateKey(bp,pkey,nil,nil,0,nil,nil);
-  //if you want a prompt for passphrase
-  log('PEM_write_bio_PrivateKey');
-  ret:= PEM_write_bio_PrivateKey(bp,pkey,EVP_des_ede3_cbc(),nil,0,nil,nil); //not saving as RSA key??
-  BIO_free(bp);
-  if ret=0 then exit;
-end;
-
-bp := BIO_new_file(pchar(GetCurrentDir+'\'+filename), 'w+');
-log('PEM_write_bio_X509');
-ret:=PEM_write_bio_X509(bp,x509);
-BIO_free(bp);
-if ret=0 then exit;
-
-//or a bundle
-{
-bp := BIO_new_file(pchar(GetCurrentDir+'\cert.crt'), 'w+');
-PEM_write_bio_X509(bp,x509);
-PEM_write_bio_PrivateKey(bp,pkey,EVP_des_ede3_cbc(),nil,0,nil,nil);
-BIO_free(bp);
-}
-//free
-X509_free(x509);
-EVP_PKEY_free(pkey);
-RSA_free(rsa);
-//
-result:=true;
 end;
 
 //to sign a csr
