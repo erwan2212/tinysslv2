@@ -8,18 +8,24 @@ interface
 uses
   windows,SysUtils;
 
+  type
+  TOSSL_PROVIDER_load = function(libctx: Pointer; const name: PChar): Pointer; cdecl;
+
+var
+  OSSL_PROVIDER_load: TOSSL_PROVIDER_load = nil;
+  // Tes handles de DLL
+  hCrypto: HMODULE = 0;
+
 const
   {$IF Defined(WIN32)}
-  LIB_CRYPTO = 'libcrypto-1_1.dll';
+   LIB_CRYPTO = 'libcrypto-1_1.dll';
   LIB_SSL = 'libssl-1_1.dll';
-  //LIB_CRYPTO = 'libcrypto-3.dll';
-  //LIB_SSL = 'libssl-3.dll';
   _PU = '';
-  {$ELSEIF Defined(WIN64)}
+   {$ELSEIF Defined(WIN64)}
   LIB_CRYPTO = 'libcrypto-1_1-x64.dll';
   LIB_SSL = 'libssl-1_1-x64.dll';
   _PU = '';
-  {$ELSEIF Defined(ANDROID64)}
+   {$ELSEIF Defined(ANDROID64)}
   LIB_CRYPTO = 'libcrypto-android64.a';
   LIB_SSL = 'libssl-android64.a';
   _PU = '';
@@ -27870,6 +27876,8 @@ function DTLSv1_get_timeout(s: PSSL; timeval: PTimeVal): LongInt;
 procedure DTLSv1_handle_timeout(s: PSSL);
 
 implementation
+
+
 
 { Helper routines }
 

@@ -7,7 +7,7 @@ interface
 uses
   windows,Classes, SysUtils,OpenSSL.Api_11,utils,inifiles,math,dateutils,sockets;
 
-procedure LoadSSL;
+function LoadSSL: Boolean;
 procedure FreeSSL;
 //function generate_rsa_key:boolean;
 function generate_rsa_key_2:boolean;
@@ -57,16 +57,17 @@ type TC_INT   = LongInt;
 implementation
 
 
-procedure LoadSSL;
+function LoadSSL: Boolean;
 begin
-  {
-  OpenSSL_add_all_algorithms;
-  OpenSSL_add_all_ciphers;
-  OpenSSL_add_all_digests;
-  }
-  OPENSSL_init_crypto(OPENSSL_INIT_ADD_ALL_CIPHERS or OPENSSL_INIT_ADD_ALL_DIGESTS, nil); //OPENSSL_config() ? //OPENSSL_init_ssl()?
-  ERR_load_crypto_strings;
-  ERR_load_RSA_strings;
+  Result := False;
+
+
+  // En OpenSSL 1.1, on appelle directement les routines importées
+    OPENSSL_init_crypto(OPENSSL_INIT_ADD_ALL_CIPHERS or OPENSSL_INIT_ADD_ALL_DIGESTS, nil);
+    ERR_load_crypto_strings();
+    ERR_load_RSA_strings();
+
+  Result := True;
 end;
 
 
@@ -1223,7 +1224,7 @@ var
   bp:pBIO;
   x: pEVP_PKEY;
 begin
-
+result:=false;
         //FKey:=LoadPublicKey('public.pem');
         FKey:=LoadPrivateKey('private.pem');
         if FKey = nil then
@@ -1710,28 +1711,66 @@ begin
   result:=true;
 end;
 
-function set_password(filename,password:string):boolean;
+function set_password(filename, password: string): boolean;
 var
-pkey:pEVP_PKEY ;
-bp:pBio;
+  pkey: pEVP_PKEY = nil;
+  bp: pBIO = nil;
+  outPath: string;
+  passAnsi: AnsiString;
+  ret: integer;
 begin
-result:=false;
-pkey:=LoadPrivateKey (filename);
-if pkey=nil then
-           begin
-           writeln('LoadPrivateKey failed');
-           exit;
-           end;
+  result := false;
 
-  bp := BIO_new_file(pchar(GetCurrentDir+'\'+'new_'+filename), 'w+');
-  log('PEM_write_bio_PrivateKey');
-  //with or without a password
-  if password=''
-     then result:=PEM_write_bio_PrivateKey(bp,pkey,nil,nil,0,nil,nil)<>-1
-     else result:=PEM_write_bio_PrivateKey(bp,pkey,EVP_des_ede3_cbc,pbyte(password),length(password),nil,nil)<>-1;
+  // 1. Charger la clé existante (attention si elle nécessite déjà un mot de passe pour être lue)
+  pkey := LoadPrivateKey(filename);
+  if pkey = nil then
+  begin
+    log('LoadPrivateKey failed', 1);
+    exit;
+  end;
 
-  BIO_free(bp);
+  try
+    // 2. Construire un chemin de sortie propre
+    outPath := ExtractFilePath(filename) + 'new_' + ExtractFileName(filename);
 
+    bp := BIO_new_file(PChar(outPath), 'w+');
+    if bp = nil then Exit;
+
+    try
+      log('PEM_write_bio_PrivateKey');
+
+      if password = '' then
+      begin
+        // Écriture en clair (pas de cipher -> pas de prompt)
+        ret := PEM_write_bio_PrivateKey(bp, pkey, nil, nil, 0, nil, nil);
+      end
+      else
+      begin
+        // Conversion explicite en AnsiString pour garantir la structure mémoire
+        passAnsi := AnsiString(password);
+
+        // Appeler EVP_des_ede3_cbc() comme fonction et passer PAnsiChar
+        ret := PEM_write_bio_PrivateKey(
+          bp,
+          pkey,
+          EVP_des_ede3_cbc(),
+          PByte(PAnsiChar(passAnsi)), // Transtypage en PByte requis par l'API
+          Length(passAnsi),
+          nil,
+          nil
+        );
+      end;
+
+      // PEM_write_bio_PrivateKey renvoie 1 en cas de succès (0 ou négatif en cas d'erreur)
+      result := (ret = 1);
+
+    finally
+      BIO_free(bp);
+    end;
+
+  finally
+    if pkey <> nil then EVP_PKEY_free(pkey);
+  end;
 end;
 
 procedure ciphers_sorted(cipher:pEVP_CIPHER; from:pchar;_to:pchar; x:pointer); cdecl;
